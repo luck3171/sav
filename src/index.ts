@@ -60,7 +60,10 @@ async function main() {
     const exportConfirmedAt = await triggerExport();
     
     // 2. 登录邮箱并校验“最新邮件是否来自本次导出”后再下载
-    await downloadLatestSavCsv(exportConfirmedAt);
+    const downloaded = await downloadLatestSavCsv(exportConfirmedAt);
+    if (!downloaded) {
+      console.log('[INFO] 轮询结束：未收到本次导出的邮件，程序正常结束。');
+    }
     
   } catch (error) {
     // 捕获到错误，优雅终止程序

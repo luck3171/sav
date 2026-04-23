@@ -7,11 +7,17 @@ import * as dotenv from 'dotenv';
 dotenv.config();
 
 const ALLOWED_TIME_SKEW_MS = 5000;
+const MAIL_WAIT_TIMEOUT_MS = 20 * 1000;
+const MAIL_POLL_INTERVAL_MS = 1000;
+
+function wait(ms: number): Promise<void> {
+  return new Promise(resolve => setTimeout(resolve, ms));
+}
 
 /**
  * 连接邮箱，寻找最新的 Sav 邮件，提取链接并下载 CSV
  */
-export async function downloadLatestSavCsv(exportConfirmedAt: Date) {
+export async function downloadLatestSavCsv(exportConfirmedAt: Date): Promise<boolean> {
   // IMAP 连接配置，使用环境变量读取邮箱凭据
   const config = {
     imap: {
@@ -25,10 +31,12 @@ export async function downloadLatestSavCsv(exportConfirmedAt: Date) {
     }
   };
 
+  let connection: imaps.ImapSimple | null = null;
+
   try {
     // 1) 连接邮箱并打开收件箱
     console.log('[INFO] 正在连接邮箱...');
-    const connection = await imaps.connect(config);
+    connection = await imaps.connect(config);
     await connection.openBox('INBOX');
 
     console.log('[INFO] 正在搜索来自 Sav 的最新邮件...');
@@ -42,37 +50,64 @@ export async function downloadLatestSavCsv(exportConfirmedAt: Date) {
     const fetchOptions = {
       bodies: [''], // 获取完整邮件源
       struct: true,
-      markSeen: true // 读取后标记为已读
+      markSeen: false // 轮询等待阶段不主动修改邮件已读状态
     };
 
-    const messages = await connection.search(searchCriteria, fetchOptions);
-
-    if (messages.length === 0) {
-      console.log('[WARN] 没有找到来自 Sav 的邮件。');
-      connection.end();
-      return;
-    }
-
-    // 4) 按时间排序后取最新一封邮件
-    const latestMessage = messages.sort((a, b) => {
-      return b.attributes.date.getTime() - a.attributes.date.getTime();
-    })[0];
-
-    const latestMessageDate = latestMessage.attributes.date;
-    const latestMessageTime = latestMessageDate.getTime();
     const exportConfirmedTime = exportConfirmedAt.getTime();
 
-    // 允许 5 秒时间偏差，避免邮箱服务器时间与本机时间轻微不同步
-    if (latestMessageTime + ALLOWED_TIME_SKEW_MS < exportConfirmedTime) {
-      console.log(
-        `[WARN] 最新邮件时间(${latestMessageDate.toISOString()})早于本次导出确认时间(${exportConfirmedAt.toISOString()})超过 ${ALLOWED_TIME_SKEW_MS}ms，本次流程终止。`
-      );
-      connection.end();
-      return;
+    console.log('[INFO] 开始轮询邮件：总时长 20 秒，每 1 秒查询一次。');
+    const deadline = Date.now() + MAIL_WAIT_TIMEOUT_MS;
+    let latestMessage: imaps.Message | undefined;
+    let latestSeenMessageDate: Date | null = null;
+    let pollRound = 0;
+
+    while (Date.now() <= deadline) {
+      pollRound += 1;
+      const messages = await connection.search(searchCriteria, fetchOptions);
+
+      if (messages.length > 0) {
+        const sortedMessages = [...messages].sort((a, b) => {
+          return b.attributes.date.getTime() - a.attributes.date.getTime();
+        });
+
+        latestSeenMessageDate = sortedMessages[0].attributes.date;
+        latestMessage = sortedMessages.find(message => {
+          const messageTime = message.attributes.date.getTime();
+          return messageTime + ALLOWED_TIME_SKEW_MS >= exportConfirmedTime;
+        });
+
+        if (latestMessage) {
+          console.log(
+            `[SUCCESS] 第 ${pollRound} 次查询命中新邮件，邮件时间: ${latestMessage.attributes.date.toISOString()}`
+          );
+          break;
+        }
+      }
+
+      const remainingMs = deadline - Date.now();
+      if (remainingMs <= 0) {
+        break;
+      }
+
+      console.log(`[INFO] 第 ${pollRound} 次未命中，1 秒后继续查询...`);
+      await wait(Math.min(MAIL_POLL_INTERVAL_MS, remainingMs));
+    }
+
+    if (!latestMessage) {
+      console.log('[WARN] 20 秒内未查询到本次导出对应的新邮件，流程结束。');
+      if (latestSeenMessageDate) {
+        console.log(
+          `[WARN] 最近一封 Sav 邮件时间: ${latestSeenMessageDate.toISOString()}，导出确认时间: ${exportConfirmedAt.toISOString()}`
+        );
+      }
+      return false;
     }
 
     console.log('[INFO] 找到最新邮件，正在解析内容...');
     const all = latestMessage.parts.find(part => part.which === '');
+    if (!all?.body) {
+      throw new Error('无法读取邮件原始内容');
+    }
     const id = latestMessage.attributes.uid;
     const idHeader = 'Imap-Id: ' + id + '\r\n';
     
@@ -127,13 +162,16 @@ export async function downloadLatestSavCsv(exportConfirmedAt: Date) {
     
     fs.writeFileSync(filePath, buffer);
     console.log(`[SUCCESS] 任务圆满完成！文件已成功保存至: ${filePath}`);
-
-    // 10) 结束邮箱连接
-    connection.end();
+    return true;
 
   } catch (error) {
     // 向控制台输出失败原因，便于排查
     console.error('[ERROR] 脚本执行失败:', error);
+    throw error;
+  } finally {
+    if (connection) {
+      connection.end();
+    }
   }
 }
 
