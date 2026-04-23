@@ -33,17 +33,20 @@ jobs:
         run: npx playwright install chromium --with-deps
 
       # 运行主程序
+      # 运行主程序
       - name: Run script
         env:
-          # 从 GitHub Secrets 中读取敏感信息
           SAV_USERNAME: ${{ secrets.SAV_USERNAME }}
           SAV_PASSWORD: ${{ secrets.SAV_PASSWORD }}
           EMAIL_USER: ${{ secrets.EMAIL_USER }}
           EMAIL_PASSWORD: ${{ secrets.EMAIL_PASSWORD }}
           EMAIL_HOST: ${{ secrets.EMAIL_HOST }}
-          # 设置无沙盒模式，有助于在 Linux 容器中运行无头浏览器
           SAV_NO_SANDBOX: 'true' 
-        run: npx ts-node src/index.ts
+        run: |
+          # 把 Secrets 里的 JSON 字符串写入到本地文件
+          echo '${{ secrets.SAV_STORAGE_STATE_JSON }}' > .sav-storage-state.json
+          # 运行代码
+          npx ts-node src/index.ts
 
       # 将下载好的 CSV 文件保存为 GitHub Artifact（构建产物）
       - name: Upload downloaded CSV
