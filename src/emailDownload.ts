@@ -89,7 +89,9 @@ export async function downloadLatestSavCsv(exportConfirmedAt: Date): Promise<boo
         break;
       }
 
-      console.log(`[INFO] 第 ${pollRound} 次未命中，1 秒后继续查询...`);
+      if (pollRound % 5 === 0) {
+        console.log(`[INFO] 已查询 ${pollRound} 次，继续等待新邮件...`);
+      }
       await wait(Math.min(MAIL_POLL_INTERVAL_MS, remainingMs));
     }
 
