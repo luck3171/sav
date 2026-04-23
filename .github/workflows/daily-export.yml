@@ -1,0 +1,58 @@
+name: Daily SAV Export
+
+on:
+  # 1. 定时触发：每天 UTC 时间凌晨 0 点和 12 点运行（相当于北京时间早上 8 点和晚上 8 点）
+  schedule:
+    - cron: '0 0,12 * * *'
+  # 2. 手动触发：允许你在 GitHub 网页端随时点击运行进行测试
+  workflow_dispatch: 
+
+jobs:
+  run-export-and-download:
+    runs-on: ubuntu-latest
+
+    steps:
+      # 检出你的代码
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # 配置 Node.js 环境
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20' # 推荐使用较新的 LTS 版本
+          cache: 'npm'
+
+      # 安装项目依赖 (package.json 中的包)
+      - name: Install dependencies
+        run: npm install
+
+      # 安装 Playwright 所需的 Chromium 浏览器及系统依赖
+      # 因为 GitHub 运行环境是干净的 Ubuntu，缺少浏览器运行所需的底层库
+      - name: Install Playwright Chromium & Dependencies
+        run: npx playwright install chromium --with-deps
+
+      # 运行主程序
+      - name: Run script
+        env:
+          # 从 GitHub Secrets 中读取敏感信息
+          SAV_USERNAME: ${{ secrets.SAV_USERNAME }}
+          SAV_PASSWORD: ${{ secrets.SAV_PASSWORD }}
+          EMAIL_USER: ${{ secrets.EMAIL_USER }}
+          EMAIL_PASSWORD: ${{ secrets.EMAIL_PASSWORD }}
+          EMAIL_HOST: ${{ secrets.EMAIL_HOST }}
+          # 设置无沙盒模式，有助于在 Linux 容器中运行无头浏览器
+          SAV_NO_SANDBOX: 'true' 
+        run: npx ts-node src/index.ts
+
+      # 将下载好的 CSV 文件保存为 GitHub Artifact（构建产物）
+      - name: Upload downloaded CSV
+        # 即使之前的步骤出现某些非致命错误，也尝试上传已下载的文件
+        if: always() 
+        uses: actions/upload-artifact@v4
+        with:
+          name: sav-auctions-csv
+          # 你的代码中文件保存在 src/downloads/ 目录下
+          path: src/downloads/*.csv
+          # 设置文件保留天数，最大可设为 90 天
+          retention-days: 30
