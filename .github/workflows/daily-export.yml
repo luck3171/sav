@@ -59,3 +59,12 @@ jobs:
           path: src/downloads/*.csv
           # 设置文件保留天数，最大可设为 90 天
           retention-days: 30
+
+      # 将错误截图保存为 Artifact，方便排查风控或 UI 变动
+      - name: Upload Error Logs
+        if: failure() # 只有在前面步骤失败时才运行
+        uses: actions/upload-artifact@v4
+        with:
+          name: error-screenshots
+          path: logs/
+          retention-days: 7
