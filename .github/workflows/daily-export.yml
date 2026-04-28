@@ -52,7 +52,7 @@ jobs:
       - name: Upload downloaded CSV
         # 即使之前的步骤出现某些非致命错误，也尝试上传已下载的文件
         if: always() 
-        uses: actions/upload-artifact@v3
+        uses: actions/upload-artifact@v4
         with:
           name: sav-auctions-csv
           # 你的代码中文件保存在 src/downloads/ 目录下
@@ -63,7 +63,7 @@ jobs:
       # 将错误截图保存为 Artifact，方便排查风控或 UI 变动
       - name: Upload Error Logs
         if: failure() # 只有在前面步骤失败时才运行
-        uses: actions/upload-artifact@v3
+        uses: actions/upload-artifact@v4
         with:
           name: error-screenshots
           path: logs/
