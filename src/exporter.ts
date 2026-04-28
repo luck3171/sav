@@ -1,6 +1,6 @@
 // 1. 修改依赖引入方式：使用 playwright-extra 代替原生的 playwright
 import { chromium } from 'playwright-extra';
-import stealth from 'playwright-extra-plugin-stealth';
+import stealth from 'puppeteer-extra-plugin-stealth';
 // 依然从 playwright 引入类型定义，保证 TypeScript 不报错
 import { type BrowserContext, type Locator, type Page } from 'playwright'; 
 
