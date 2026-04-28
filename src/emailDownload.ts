@@ -38,6 +38,7 @@ export async function downloadLatestSavCsv(exportConfirmedAt: Date, appConfig: t
       let targetUid: number | undefined;
 
       while (Date.now() <= deadline) {
+        await client.noop();
         const uids = await client.search({ from: 'support@sav.com' });
 
         // 类型守卫：确保 uids 是数组且不为空
