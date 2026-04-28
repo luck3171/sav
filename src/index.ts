@@ -1,74 +1,91 @@
-// index.ts
 import * as dotenv from 'dotenv';
+import { z } from 'zod';
 import * as fs from 'fs';
 import * as path from 'path';
 import { triggerExport } from './exporter';
 import { downloadLatestSavCsv } from './emailDownload';
 
+// 必须在所有环境变量解析之前调用
 dotenv.config();
 
-// 将环境变量字符串解析为布尔开关
-function parseBooleanEnv(value: string | undefined): boolean {
-  return value === '1' || value?.toLowerCase() === 'true';
-}
+// 1. 定义环境变量的 Schema
+const envSchema = z.object({
+  // 邮箱配置：严格校验必填项和邮箱格式
+  EMAIL_USER: z.string().email("EMAIL_USER 必须是有效的邮箱地址"),
+  EMAIL_PASSWORD: z.string().min(1, "缺少 EMAIL_PASSWORD"),
+  EMAIL_HOST: z.string().min(1, "缺少 EMAIL_HOST"),
 
-// 获取本地会话状态文件路径，默认存放在项目根目录
-function getStorageStatePath(): string {
-  const configuredPath = process.env.SAV_STORAGE_STATE_PATH;
-  return configuredPath && configuredPath.trim().length > 0
-    ? path.resolve(configuredPath)
-    : path.resolve(process.cwd(), '.sav-storage-state.json');
-}
+  // SAV 登录配置：设为可选，因为有 Session 缓存时不需要
+  SAV_USERNAME: z.string().email("SAV_USERNAME 必须是有效的邮箱地址").optional(),
+  SAV_PASSWORD: z.string().optional(),
 
-// 读取并校验必需环境变量，缺失则立即抛错终止
-function getRequiredEnv(name: string): string {
-  const value = process.env[name];
-  if (!value) {
-    throw new Error(`缺少必需环境变量: ${name}`);
+  // 高级配置：利用 preprocess 自动处理 'true'/'1' 的布尔转换
+  SAV_FORCE_RELOGIN: z.preprocess(
+    (val) => val === '1' || String(val).toLowerCase() === 'true',
+    z.boolean()
+  ).default(false),
+
+  // 路径配置：提供默认值并自动处理绝对路径
+  SAV_STORAGE_STATE_PATH: z.string()
+    .trim()
+    .min(1)
+    .default(path.resolve(process.cwd(), '.sav-storage-state.json')),
+
+  SAV_NO_SANDBOX: z.preprocess(
+    (val) => val === '1' || String(val).toLowerCase() === 'true',
+    z.boolean()
+  ).default(false),
+
+  // 超时配置：自动将字符串数字转换为 number
+  SAV_EXPORT_TIMEOUT_MS: z.coerce.number().default(30000),
+
+}).superRefine((data, ctx) => {
+  // 2. 复杂的跨字段级联校验 (Business Logic Validation)
+  const hasReusableSession = !data.SAV_FORCE_RELOGIN && fs.existsSync(data.SAV_STORAGE_STATE_PATH);
+  
+  if (!hasReusableSession) {
+    if (!data.SAV_USERNAME) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "未检测到可用会话或强制重登时，必须配置 SAV_USERNAME",
+        path: ["SAV_USERNAME"]
+      });
+    }
+    if (!data.SAV_PASSWORD) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "未检测到可用会话或强制重登时，必须配置 SAV_PASSWORD",
+        path: ["SAV_PASSWORD"]
+      });
+    }
   }
-  return value;
+});
+
+// 3. 执行解析，如果失败 Zod 会抛出详细的错误并终止程序
+export const config = envSchema.parse(process.env);
+
+// 此时如果通过校验，可以安全地输出启动信息
+const hasReusableSession = !config.SAV_FORCE_RELOGIN && fs.existsSync(config.SAV_STORAGE_STATE_PATH);
+if (hasReusableSession) {
+  console.log(`[INFO] 已检测到会话状态文件，将优先复用: ${config.SAV_STORAGE_STATE_PATH}`);
+} else {
+  console.log('[INFO] 未检测到可复用会话，将使用账号密码登录。');
 }
 
-// 启动前统一校验运行时配置，避免执行到中途才失败
-function validateRuntimeConfig(): void {
-  const storageStatePath = getStorageStatePath();
-  const forceRelogin = parseBooleanEnv(process.env.SAV_FORCE_RELOGIN);
-  const hasReusableSession = !forceRelogin && fs.existsSync(storageStatePath);
-
-  // 会话可复用时可跳过账号密码登录，但邮箱配置仍必须存在
-  if (hasReusableSession) {
-    console.log(`[INFO] 已检测到会话状态文件，将优先复用: ${storageStatePath}`);
-  } else {
-    // 首次运行或强制重登时要求提供 SAV 登录凭据
-    getRequiredEnv('SAV_USERNAME');
-    getRequiredEnv('SAV_PASSWORD');
-    console.log('[INFO] 未检测到可复用会话，将使用账号密码登录。');
-  }
-
-  // 邮箱下载链路必需配置
-  getRequiredEnv('EMAIL_USER');
-  getRequiredEnv('EMAIL_PASSWORD');
-  getRequiredEnv('EMAIL_HOST');
-}
 
 async function main() {
   try {
-    // 0. 启动前配置检查
-    validateRuntimeConfig();
-
-    // 1. 去网页触发导出
-    const exportConfirmedAt = await triggerExport();
+    // 4. 将验证后的 config 传递给 downstream 模块，解耦了对 process.env 的直接依赖
+    const exportConfirmedAt = await triggerExport(config);
     
-    // 2. 登录邮箱并校验“最新邮件是否来自本次导出”后再下载
-    const downloaded = await downloadLatestSavCsv(exportConfirmedAt);
+    const downloaded = await downloadLatestSavCsv(exportConfirmedAt, config);
     if (!downloaded) {
       console.log('[INFO] 轮询结束：未收到本次导出的邮件，程序正常结束。');
     }
     
   } catch (error) {
-    // 捕获到错误，优雅终止程序
-    console.error('[ERROR] 前置任务失败，后续流程已终止。', error);
-    process.exit(1); // 强制结束 Node.js 进程并返回错误状态码
+    console.error('[ERROR] 任务执行失败。', error);
+    process.exit(1); 
   }
 }
 
