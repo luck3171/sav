@@ -1,6 +1,6 @@
 // 1. 修改依赖引入方式：使用 playwright-extra 代替原生的 playwright
 import { chromium } from 'playwright-extra';
-import stealth from 'puppeteer-extra-plugin-stealth';
+import stealth from 'playwright-extra-plugin-stealth';
 // 依然从 playwright 引入类型定义，保证 TypeScript 不报错
 import { type BrowserContext, type Locator, type Page } from 'playwright'; 
 
@@ -15,6 +15,23 @@ const SAV_AUCTIONS_URL = 'https://v2.sav.com/domains/auctions';
 
 // 导出流程统一超时，支持通过环境变量覆盖
 const DEFAULT_TIMEOUT_MS = Number(process.env.SAV_EXPORT_TIMEOUT_MS || 30000);
+
+async function waitForCloudflare(page: Page): Promise<void> {
+  // 等待 cf_clearance 这个关键 cookie 被设置，或等待页面跳转离开验证页
+  try {
+    await page.waitForFunction(
+      () => document.cookie.includes('cf_clearance'),
+      { timeout: 30000 } // 最多等30秒
+    );
+    console.log('[INFO] Cloudflare 验证已通过');
+  } catch {
+    // 如果 30 秒后还没有 cf_clearance，可能不是 Cloudflare 页，或者验证太慢
+    console.log('[WARN] 未检测到 cf_clearance cookie，可能不在验证页或等待超时');
+  }
+  
+  // 额外等待页面真正稳定下来（Cloudflare 的跳转可能需要额外时间）
+  await page.waitForLoadState('networkidle').catch(() => {});
+}
 
 // 将环境变量字符串解析为布尔值，便于开关配置
 function parseBooleanEnv(value: string | undefined): boolean {
@@ -266,6 +283,7 @@ export async function triggerExport(): Promise<Date> {
     // 先进入目标业务页，后续根据页面状态决定是否需要登录
     console.log('[INFO] 正在访问 SAV 拍卖页...');
     await page.goto(SAV_AUCTIONS_URL, { waitUntil: 'domcontentloaded', timeout: DEFAULT_TIMEOUT_MS });
+    await waitForCloudflare(page);
 
     if (canReuseState) {
       console.log('[INFO] 检测到会话状态文件，正在验证是否可复用...');
