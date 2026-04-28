@@ -55,6 +55,10 @@ export async function downloadLatestSavCsv(exportConfirmedAt: Date, appConfig: t
           });
           
           const latestMsg = sorted[0];
+          // 在 emailDownload.ts 中增加这一行
+          if (latestMsg.envelope?.date) {
+              console.log(`[DEBUG] 找到最新邮件时间: ${latestMsg.envelope.date.toISOString()}, 网页触发时间: ${exportConfirmedAt.toISOString()}`);
+            }
 
           // 确保 date 存在后再进行时间比对
           if (
