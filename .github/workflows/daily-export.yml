@@ -46,14 +46,20 @@ jobs:
             sav-session-${{ runner.os }}-
 
       - name: Execute Export Script
+        env:
+          # 关键：先将 Secret 存入环境变量，避免 Shell 解析错误
+          SAV_JSON_SEED: ${{ secrets.SAV_STORAGE_STATE_JSON }}
         run: |
-          # 检查并初始化 Session 文件 (如果 Cache 未命中)
-          if [ ! -f "${{ env.SAV_STORAGE_STATE_PATH }}" ] && [ "${{ secrets.SAV_STORAGE_STATE_JSON }}" != "" ]; then
-            echo "[INFO] Cache missed, initializing from secret seed..."
-            echo '${{ secrets.SAV_STORAGE_STATE_JSON }}' > "${{ env.SAV_STORAGE_STATE_PATH }}"
+          # 使用 -n 判断环境变量是否非空，这样非常安全
+          if [ -n "$SAV_JSON_SEED" ]; then
+            echo "[INFO] Initializing Session file from secret seed..."
+            echo "$SAV_JSON_SEED" > "${{ env.SAV_STORAGE_STATE_PATH }}"
           fi
           
-          # 使用 xvfb-run 启动有头模式浏览器，绕过 Cloudflare 检测
+          # 打印一下文件列表，确认文件真的在那儿（可选调试）
+          ls -la "${{ env.SAV_STORAGE_STATE_PATH }}" || echo "[WARN] Session file not found!"
+
+          # 使用 xvfb-run 启动
           xvfb-run --auto-servernum --server-args="-screen 0 1920x1080x24" npx ts-node src/index.ts
 
       - name: Save Session Cache
