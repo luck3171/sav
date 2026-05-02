@@ -1,68 +1,80 @@
 name: Daily SAV Export
 
 on:
-  # 1. 定时触发：每天 UTC 时间凌晨 0 点和 12 点运行（相当于北京时间早上 8 点和晚上 8 点）
   schedule:
-    - cron: '0 0,12 * * *'
-  # 2. 手动触发：允许你在 GitHub 网页端随时点击运行进行测试
-  workflow_dispatch: 
+    - cron: '0 0,12 * * *' # 每天北京时间 08:00 和 20:00 运行
+  workflow_dispatch: # 支持手动触发测试
 
 jobs:
   run-export-and-download:
     runs-on: ubuntu-latest
+    # 将公共环境变量提取到 Job 级别，使步骤更简洁
+    env:
+      SAV_USERNAME: ${{ secrets.SAV_USERNAME }}
+      SAV_PASSWORD: ${{ secrets.SAV_PASSWORD }}
+      EMAIL_USER: ${{ secrets.EMAIL_USER }}
+      EMAIL_PASSWORD: ${{ secrets.EMAIL_PASSWORD }}
+      EMAIL_HOST: ${{ secrets.EMAIL_HOST }}
+      SAV_NO_SANDBOX: 'true'
+      SAV_STORAGE_STATE_PATH: .sav-storage-state.json
+      GITHUB_ACTIONS: 'true'
 
     steps:
-      # 检出你的代码
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      # 配置 Node.js 环境
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: '20' # 推荐使用较新的 LTS 版本
+          node-version: '20'
           cache: 'npm'
 
-      # 安装项目依赖 (package.json 中的包)
-      - name: Install dependencies
+      - name: Install Node dependencies
         run: npm install
-
-      # 安装 Playwright 所需的 Chromium 浏览器及系统依赖
-      # 因为 GitHub 运行环境是干净的 Ubuntu，缺少浏览器运行所需的底层库
-      - name: Install Playwright Chromium & Dependencies
-        run: npx playwright install chromium --with-deps
-
-      # 运行主程序
-      # 运行主程序
-      - name: Run script
-        env:
-          SAV_USERNAME: ${{ secrets.SAV_USERNAME }}
-          SAV_PASSWORD: ${{ secrets.SAV_PASSWORD }}
-          EMAIL_USER: ${{ secrets.EMAIL_USER }}
-          EMAIL_PASSWORD: ${{ secrets.EMAIL_PASSWORD }}
-          EMAIL_HOST: ${{ secrets.EMAIL_HOST }}
-          SAV_NO_SANDBOX: 'true' 
+      - name: Install Playwright & Xvfb
         run: |
-          # 把 Secrets 里的 JSON 字符串写入到本地文件
-          echo '${{ secrets.SAV_STORAGE_STATE_JSON }}' > .sav-storage-state.json
-          # 运行代码
-          npx ts-node src/index.ts
+          sudo apt-get update
+          sudo apt-get install -y xvfb
+          npx playwright install chromium --with-deps
 
-      # 将下载好的 CSV 文件保存为 GitHub Artifact（构建产物）
-      - name: Upload downloaded CSV
-        # 即使之前的步骤出现某些非致命错误，也尝试上传已下载的文件
+      - name: Restore Session Cache
+        uses: actions/cache/restore@v4
+        with:
+          path: ${{ env.SAV_STORAGE_STATE_PATH }}
+          key: sav-session-${{ runner.os }}-${{ github.run_id }}
+          restore-keys: |
+            sav-session-${{ runner.os }}-
+
+      - name: Execute Export Script
+        run: |
+          # 检查并初始化 Session 文件 (如果 Cache 未命中)
+          if [ ! -f "${{ env.SAV_STORAGE_STATE_PATH }}" ] && [ "${{ secrets.SAV_STORAGE_STATE_JSON }}" != "" ]; then
+            echo "[INFO] Cache missed, initializing from secret seed..."
+            echo '${{ secrets.SAV_STORAGE_STATE_JSON }}' > "${{ env.SAV_STORAGE_STATE_PATH }}"
+          fi
+          
+          # 使用 xvfb-run 启动有头模式浏览器，绕过 Cloudflare 检测
+          xvfb-run --auto-servernum --server-args="-screen 0 1920x1080x24" npx ts-node src/index.ts
+
+      - name: Save Session Cache
+      #仅在导出成功且 Session 更新时保存
+        if: success()    
+        uses: actions/cache/save@v4 # <--- 必须补全这一行，解决报错
+        with:
+          path: ${{ env.SAV_STORAGE_STATE_PATH }}
+          key: sav-session-${{ runner.os }}-${{ github.run_id }}
+      - name: Upload Downloaded CSV
+      # 确保即使脚本部分出错也尝试上传已下载的 CSV
         if: always() 
         uses: actions/upload-artifact@v4
         with:
           name: sav-auctions-csv
-          # 你的代码中文件保存在 src/downloads/ 目录下
           path: downloads/*.csv
-          # 设置文件保留天数，最大可设为 90 天
           retention-days: 30
 
-      # 将错误截图保存为 Artifact，方便排查风控或 UI 变动
       - name: Upload Error Logs
-        if: failure() # 只有在前面步骤失败时才运行
+      # 仅在失败时上传截图用于排查
+        if: failure() 
         uses: actions/upload-artifact@v4
         with:
           name: error-screenshots

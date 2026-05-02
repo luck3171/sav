@@ -12,11 +12,6 @@ const SAV_AUCTIONS_URL = 'https://v2.sav.com/domains/auctions';
 
 // 集中管理所有的超时“魔法数字”
 const TIMEOUTS = {
-  EMAIL_INPUT_QUICK: 600,
-  EMAIL_INPUT_LONG: 25000,
-  PASSWORD_INPUT_QUICK: 800,
-  PASSWORD_INPUT_MEDIUM: 3000,
-  PASSWORD_INPUT_LONG: 18000,
   NETWORK_IDLE: 10000,
   CF_WAIT: 30000,
   ELEMENT_VISIBLE: 3000,
@@ -41,26 +36,27 @@ async function waitForCloudflare(page: Page): Promise<void> {
 
 function getLaunchArgs(appConfig: typeof config): string[] {
   const args = ['--disable-dev-shm-usage'];
-  // 假设 index.ts 中的 Zod schema 已经添加了 SAV_NO_SANDBOX 的布尔解析
   if (appConfig.SAV_NO_SANDBOX) {
     args.push('--no-sandbox');
   }
   return args;
 }
 
+// 修改点 1：修复会话校验，直接识别 Sign In 文本避免假阳性
 async function isSessionValid(page: Page): Promise<boolean> {
   const lowerUrl = page.url().toLowerCase();
-  if (lowerUrl.endsWith('/login') || lowerUrl.includes('/users/login')) return false;
+  if (lowerUrl.includes('/login')) return false;
 
-  const loginEmailInput = page.getByPlaceholder('Enter your email').first();
+  const signInBtn = page.getByText(/sign in/i).first();
   try {
-    await loginEmailInput.waitFor({ state: 'visible', timeout: TIMEOUTS.ELEMENT_VISIBLE });
-    return false;
+    await signInBtn.waitFor({ state: 'visible', timeout: TIMEOUTS.ELEMENT_VISIBLE });
+    return false; 
   } catch {
-    return true;
+    return true; 
   }
 }
 
+// 修改点 2：彻底重构登录流程，模拟真人点击弹窗与顺次输入
 async function performLogin(page: Page, appConfig: typeof config): Promise<void> {
   const username = appConfig.SAV_USERNAME;
   const password = appConfig.SAV_PASSWORD;
@@ -70,116 +66,73 @@ async function performLogin(page: Page, appConfig: typeof config): Promise<void>
     throw new Error('缺少 SAV_USERNAME 或 SAV_PASSWORD，无法执行登录。');
   }
 
-  const waitForEmailInput = async (timeoutMs: number): Promise<Locator | null> => {
-    const deadline = Date.now() + timeoutMs;
-    while (Date.now() < deadline) {
-      const candidates = [
-        page.getByPlaceholder('Enter your email').first(),
-        page.getByPlaceholder(/email/i).first(),
-        page.locator('input[type="email"]').first(),
-      ];
-      for (const candidate of candidates) {
-        try {
-          if ((await candidate.count()) > 0 && await candidate.isVisible({ timeout: TIMEOUTS.EMAIL_INPUT_QUICK })) {
-            return candidate;
-          }
-        } catch {}
-      }
-      await page.waitForTimeout(250);
+  console.log('[INFO] 页面加载中，强行等待 3 秒，防止过快触碰导致幽灵刷新...');
+  await page.waitForTimeout(3000);
+
+  console.log('[INFO] 尝试唤起登录面板...');
+  const topSignInBtn = page.getByText(/sign in/i).first();
+  try {
+    if (await topSignInBtn.isVisible({ timeout: 5000 })) {
+      console.log('[INFO] 发现页面右上角 Sign In 按钮，直接点击唤起登录...');
+      await topSignInBtn.click();
+      await page.waitForTimeout(1500); 
+    } else {
+      console.log('[INFO] 未发现 Sign In 按钮，尝试跳转登录页...');
+      await page.goto(SAV_LOGIN_URL, { waitUntil: 'domcontentloaded', timeout: globalTimeout });
     }
-    return null;
-  };
-
-  const submitEmailStep = async (): Promise<void> => {
-    const signInButtons = page.getByRole('button', { name: /^sign in$/i });
-    for (let i = 0; i < await signInButtons.count(); i++) {
-      try {
-        if (await signInButtons.nth(i).isVisible({ timeout: TIMEOUTS.PASSWORD_INPUT_QUICK })) {
-          await signInButtons.nth(i).click();
-          return;
-        }
-      } catch {}
-    }
-    await page.keyboard.press('Enter');
-  };
-
-  const waitForPasswordInput = async (timeoutMs: number): Promise<Locator | null> => {
-    const deadline = Date.now() + timeoutMs;
-    while (Date.now() < deadline) {
-      const candidates = [
-        page.locator('input[type="password"]').first(),
-        page.getByPlaceholder(/password/i).first(),
-      ];
-      for (const candidate of candidates) {
-        try {
-          if ((await candidate.count()) > 0 && await candidate.isVisible({ timeout: TIMEOUTS.PASSWORD_INPUT_QUICK })) {
-            return candidate;
-          }
-        } catch {}
-      }
-      await page.waitForTimeout(250);
-    }
-    return null;
-  };
-
-  const switchToLegacyLogin = async (reason: string): Promise<boolean> => {
-    const legacyEntry = page.getByText(/legacy sign in page/i).first();
-    if ((await legacyEntry.count()) > 0) {
-      console.log(`[INFO] ${reason}，尝试切换到 Legacy 登录页...`);
-      await legacyEntry.click();
-      await page.waitForLoadState('domcontentloaded');
-      return true;
-    }
-    return false;
-  };
-
-  console.log('[INFO] 正在填写邮箱和密码...');
-  await page.goto(SAV_LOGIN_URL, { waitUntil: 'domcontentloaded', timeout: globalTimeout });
-
-  try { await page.waitForLoadState('networkidle', { timeout: TIMEOUTS.NETWORK_IDLE }); } catch {}
-
-  const emailInput = await waitForEmailInput(TIMEOUTS.EMAIL_INPUT_LONG);
-  if (!emailInput) throw new Error(`未找到邮箱输入框，当前页面: ${page.url()}`);
-
-  const recaptchaError = page.getByText(/invalid site key|recaptcha/i).first();
-  if ((await recaptchaError.count()) > 0) {
-    await switchToLegacyLogin('检测到 reCAPTCHA 异常');
+  } catch {
+    await page.goto(SAV_LOGIN_URL, { waitUntil: 'domcontentloaded', timeout: globalTimeout });
   }
-
-  const activeEmailInput = await waitForEmailInput(TIMEOUTS.NETWORK_IDLE) || emailInput;
-  await activeEmailInput.fill(username);
-  
-  let passwordInput = await waitForPasswordInput(TIMEOUTS.PASSWORD_INPUT_MEDIUM);
-  if (!passwordInput) {
-    await submitEmailStep();
-    passwordInput = await waitForPasswordInput(TIMEOUTS.PASSWORD_INPUT_LONG);
-  }
-
-  if (!passwordInput) {
-    if (await switchToLegacyLogin('未检测到密码框')) {
-      const legacyEmailInput = await waitForEmailInput(15000);
-      if (legacyEmailInput) {
-        await legacyEmailInput.fill(username);
-        passwordInput = await waitForPasswordInput(TIMEOUTS.PASSWORD_INPUT_MEDIUM);
-        if (!passwordInput) {
-          await submitEmailStep();
-          passwordInput = await waitForPasswordInput(TIMEOUTS.PASSWORD_INPUT_LONG);
-        }
-      }
-    }
-  }
-
-  if (!passwordInput) throw new Error('登录流程未出现密码输入框，请检查站点登录步骤或风控。');
-  await passwordInput.fill(password);
-  await submitEmailStep();
 
   try {
-    await page.waitForURL('**/domains/auctions', { timeout: globalTimeout });
-  } catch {
-    await page.goto(SAV_AUCTIONS_URL, { waitUntil: 'domcontentloaded', timeout: globalTimeout });
+    console.log('[INFO] 等待邮箱输入框...');
+    const emailInput = page.getByPlaceholder(/enter your email/i).first();
+    
+    try {
+      await emailInput.waitFor({ state: 'visible', timeout: 8000 });
+    } catch {
+      console.log('[INFO] 弹窗疑似被页面刷新吞掉，尝试重新点击 Sign In...');
+      await topSignInBtn.click().catch(() => {});
+      await emailInput.waitFor({ state: 'visible', timeout: 8000 });
+    }
+
+    await emailInput.pressSequentially(username, { delay: 50 }); 
+    
+    console.log('[INFO] 提交邮箱...');
+    // 修复 1：稍微停顿 0.5 秒，让框架把邮箱的值同步进去，确保按钮处于可点击状态
+    await page.waitForTimeout(500);
+
+    // 修复 2：将 .first() 改为 .last()，或者通过精确匹配。
+    // 因为弹窗通常在 DOM 树的最后，用 last() 可以完美避开背景页面上可能残留的同名按钮
+    const modalSubmitBtn = page.getByRole('button', { name: /sign in|continue|next/i, exact: false }).last();
+    
+    // 确保这个黑色按钮真的可见并且可交互后再点
+    await modalSubmitBtn.waitFor({ state: 'visible', timeout: 5000 });
+    await modalSubmitBtn.click();
+
+    console.log('[INFO] 等待密码输入框...');
+    const passwordInput = page.locator('input[type="password"]').first();
+    // 必须确保密码框变为 visible 后，才能填入密码
+    await passwordInput.waitFor({ state: 'visible', timeout: 15000 });
+    await passwordInput.pressSequentially(password, { delay: 50 });
+
+    console.log('[INFO] 提交密码...');
+    await modalSubmitBtn.click();
+
+    console.log('[INFO] 抛弃网络静默，等待弹窗消失（视觉确认）...');
+    // 等待密码框彻底从画面中消失，代表前端处理完毕关闭了弹窗
+    await passwordInput.waitFor({ state: 'hidden', timeout: 15000 });
+
+    console.log('[INFO] 弹窗已消失，等待状态同步落盘...');
+    // 强制等待 3 秒，等 Cookie 写入
+    await page.waitForTimeout(3000);
+
+  } catch (error) {
+    console.error('[ERROR] 填写账号密码时发生异常:', error);
+    throw error;
   }
 }
-
+  
 async function saveStorageState(context: BrowserContext, storageStatePath: string): Promise<void> {
   fs.mkdirSync(path.dirname(storageStatePath), { recursive: true });
   await context.storageState({ path: storageStatePath });
@@ -189,11 +142,19 @@ export async function triggerExport(appConfig: typeof config): Promise<Date> {
   const { SAV_STORAGE_STATE_PATH: storageStatePath, SAV_FORCE_RELOGIN: forceRelogin, SAV_EXPORT_TIMEOUT_MS: globalTimeout } = appConfig;
   const canReuseState = !forceRelogin && fs.existsSync(storageStatePath);
 
-  const browser = await chromium.launch({ headless: true, args: getLaunchArgs(appConfig) });
+  // 核心改动：在服务器环境(GITHUB_ACTIONS)下强制使用 headless: false 配合 xvfb-run
+  const isServer = process.env.GITHUB_ACTIONS === 'true';
+  const browser = await chromium.launch({ 
+    headless: isServer ? false : true, // 服务器端必须为 false 配合 Xvfb
+    args: getLaunchArgs(appConfig) 
+  });
+
   const context = await browser.newContext({
+    viewport: { width: 1920, height: 1080 }, // 固定分辨率防止 UI 变形[cite: 10]
     ignoreHTTPSErrors: true,
     ...(canReuseState ? { storageState: storageStatePath } : {})
   });
+  
   context.setDefaultTimeout(globalTimeout);
   const page = await context.newPage();
 
@@ -206,6 +167,7 @@ export async function triggerExport(appConfig: typeof config): Promise<Date> {
     if (!sessionReady) {
       await performLogin(page, appConfig);
       await saveStorageState(context, storageStatePath);
+      // 登录完成后重载页面，确保 Export 按钮被渲染出来
       await page.goto(SAV_AUCTIONS_URL, { waitUntil: 'domcontentloaded', timeout: globalTimeout });
       sessionReady = await isSessionValid(page);
     }
