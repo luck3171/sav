@@ -49,13 +49,14 @@ jobs:
 
       # 2. 播种逻辑：仅在 Cache 未命中时执行
       - name: Seed Initial State from Secret
-        if: steps.cache-session.outputs.cache-hit != 'true' 
-        # 【核心修复】防止覆盖有效缓存
         env:
           SAV_JSON_SEED: ${{ secrets.SAV_STORAGE_STATE_JSON }}
         run: |
-          if [ -n "$SAV_JSON_SEED" ]; then
-            echo "[INFO] Cache missed. Seeding Session file from secret..."
+          # -f 检查文件是否存在
+          if [ -f "${{ env.SAV_STORAGE_STATE_PATH }}" ]; then
+            echo "[INFO] Session file successfully restored from cache. Skipping seed."
+          elif [ -n "$SAV_JSON_SEED" ]; then
+            echo "[INFO] Cache missed (file not found). Seeding Session file from secret..."
             cat << EOF > "${{ env.SAV_STORAGE_STATE_PATH }}"
           $SAV_JSON_SEED
           EOF
