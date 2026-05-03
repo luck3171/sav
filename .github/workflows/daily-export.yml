@@ -8,7 +8,6 @@ on:
 jobs:
   run-export-and-download:
     runs-on: ubuntu-latest
-    # 将公共环境变量提取到 Job 级别，使步骤更简洁
     env:
       SAV_USERNAME: ${{ secrets.SAV_USERNAME }}
       SAV_PASSWORD: ${{ secrets.SAV_PASSWORD }}
@@ -30,14 +29,17 @@ jobs:
           cache: 'npm'
 
       - name: Install Node dependencies
-        run: npm install
+        run: npm ci # 【优化】使用 ci 代替 install，提升构建速度和稳定性
+
       - name: Install Playwright & Xvfb
         run: |
           sudo apt-get update
           sudo apt-get install -y xvfb
           npx playwright install chromium --with-deps
 
+      # 1. 尝试恢复最新的会话缓存
       - name: Restore Session Cache
+        id: cache-session # 【关键】增加 ID 以供后续步骤引用
         uses: actions/cache/restore@v4
         with:
           path: ${{ env.SAV_STORAGE_STATE_PATH }}
@@ -45,42 +47,49 @@ jobs:
           restore-keys: |
             sav-session-${{ runner.os }}-
 
-      - name: Execute Export Script
+      # 2. 播种逻辑：仅在 Cache 未命中时执行
+      - name: Seed Initial State from Secret
+        if: steps.cache-session.outputs.cache-hit != 'true' # 【核心修复】防止覆盖有效缓存
         env:
-          # 关键：先将 Secret 存入环境变量，避免 Shell 解析错误
           SAV_JSON_SEED: ${{ secrets.SAV_STORAGE_STATE_JSON }}
         run: |
-          # 使用 -n 判断环境变量是否非空，这样非常安全
           if [ -n "$SAV_JSON_SEED" ]; then
-            echo "[INFO] Initializing Session file from secret seed..."
-            echo "$SAV_JSON_SEED" > "${{ env.SAV_STORAGE_STATE_PATH }}"
+            echo "[INFO] Cache missed. Seeding Session file from secret..."
+            # 【优化】使用 EOF 安全写入多行 JSON，避免转义错误
+            cat << 'EOF' > "${{ env.SAV_STORAGE_STATE_PATH }}"
+          $SAV_JSON_SEED
+          EOF
+          else
+            echo "[WARN] Cache missed and no seed secret provided. Script will attempt fresh login."
           fi
-          
-          # 打印一下文件列表，确认文件真的在那儿（可选调试）
-          ls -la "${{ env.SAV_STORAGE_STATE_PATH }}" || echo "[WARN] Session file not found!"
 
-          # 使用 xvfb-run 启动
+      # 3. 核心业务：在虚拟显示器中执行 TS 脚本
+      - name: Execute Export Script
+        run: |
+          # 运行前检查文件是否存在，方便在 Actions 日志中排错
+          ls -la "${{ env.SAV_STORAGE_STATE_PATH }}" || echo "[WARN] Session file not found on disk!"
           xvfb-run --auto-servernum --server-args="-screen 0 1920x1080x24" npx ts-node src/index.ts
 
+      # 4. 存档：覆盖并保存最新的状态
       - name: Save Session Cache
-      #仅在导出成功且 Session 更新时保存
-        if: success()    
-        uses: actions/cache/save@v4 # <--- 必须补全这一行，解决报错
+        if: success()
+        uses: actions/cache/save@v4
         with:
           path: ${{ env.SAV_STORAGE_STATE_PATH }}
           key: sav-session-${{ runner.os }}-${{ github.run_id }}
+
+      # 5. 上传导出的 CSV 文件
       - name: Upload Downloaded CSV
-      # 确保即使脚本部分出错也尝试上传已下载的 CSV
-        if: always() 
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: sav-auctions-csv
           path: downloads/*.csv
           retention-days: 30
 
+      # 6. 上传错误截图
       - name: Upload Error Logs
-      # 仅在失败时上传截图用于排查
-        if: failure() 
+        if: failure()
         uses: actions/upload-artifact@v4
         with:
           name: error-screenshots
