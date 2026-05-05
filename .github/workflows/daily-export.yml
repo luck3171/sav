@@ -26,10 +26,13 @@ jobs:
       SAV_STORAGE_STATE_PATH: .sav-storage-state.json
       GITHUB_ACTIONS: 'true'
       
-      # === Cloudflare R2 专属配置 ===
       S3_BUCKET: 'domains-storage' 
       R2_ENDPOINT: 'https://88a983a33ad1822518ad743ad7d98dcb.r2.cloudflarestorage.com'
-      AWS_REGION: 'auto' 
+      
+      # [修改这里]：直接传入 AWS CLI 识别的默认环境变量名
+      AWS_DEFAULT_REGION: 'auto' 
+      AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+      AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
 
     steps:
       - name: Checkout repository
@@ -50,12 +53,6 @@ jobs:
           sudo apt-get install -y xvfb
           npx playwright install chromium --with-deps
 
-      - name: Configure AWS Credentials for R2
-        uses: aws-actions/configure-aws-credentials@v4
-        with:
-          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          aws-region: ${{ env.AWS_REGION }}
 
       - name: Restore Session Cache from R2 & Seed Fallback
         env:
