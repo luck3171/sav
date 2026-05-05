@@ -5,9 +5,17 @@ on:
     - cron: '0 0,12 * * *' # 每天北京时间 08:00 和 20:00 运行
   workflow_dispatch: # 支持手动触发测试
 
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}
+  cancel-in-progress: false 
+
 jobs:
   run-export-and-download:
     runs-on: ubuntu-latest
+    timeout-minutes: 45
     env:
       SAV_USERNAME: ${{ secrets.SAV_USERNAME }}
       SAV_PASSWORD: ${{ secrets.SAV_PASSWORD }}
@@ -17,6 +25,11 @@ jobs:
       SAV_NO_SANDBOX: 'true'
       SAV_STORAGE_STATE_PATH: .sav-storage-state.json
       GITHUB_ACTIONS: 'true'
+      
+      # === Cloudflare R2 专属配置 ===
+      S3_BUCKET: 'domains-storage' 
+      R2_ENDPOINT: 'https://88a983a33ad1822518ad743ad7d98dcb.r2.cloudflarestorage.com'
+      AWS_REGION: 'auto' 
 
     steps:
       - name: Checkout repository
@@ -29,7 +42,7 @@ jobs:
           cache: 'npm'
 
       - name: Install Node dependencies
-        run: npm ci # 【优化】使用 ci 代替 install，提升构建速度和稳定性
+        run: npm ci
 
       - name: Install Playwright & Xvfb
         run: |
@@ -37,62 +50,80 @@ jobs:
           sudo apt-get install -y xvfb
           npx playwright install chromium --with-deps
 
-      # 1. 尝试恢复最新的会话缓存
-      - name: Restore Session Cache
-        id: cache-session # 【关键】增加 ID 以供后续步骤引用
-        uses: actions/cache/restore@v4
+      - name: Configure AWS Credentials for R2
+        uses: aws-actions/configure-aws-credentials@v4
         with:
-          path: ${{ env.SAV_STORAGE_STATE_PATH }}
-          key: sav-session-${{ runner.os }}-${{ github.run_id }}
-          restore-keys: |
-            sav-session-${{ runner.os }}-
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
 
-      # 2. 播种逻辑：仅在 Cache 未命中时执行
-      - name: Seed Initial State from Secret
+      - name: Restore Session Cache from R2 & Seed Fallback
         env:
           SAV_JSON_SEED: ${{ secrets.SAV_STORAGE_STATE_JSON }}
         run: |
-          # -f 检查文件是否存在
-          if [ -f "${{ env.SAV_STORAGE_STATE_PATH }}" ]; then
-            echo "[INFO] Session file successfully restored from cache. Skipping seed."
-          elif [ -n "$SAV_JSON_SEED" ]; then
-            echo "[INFO] Cache missed (file not found). Seeding Session file from secret..."
-            cat << EOF > "${{ env.SAV_STORAGE_STATE_PATH }}"
-          $SAV_JSON_SEED
-          EOF
+          echo "[INFO] Attempting to directly download Session file from R2..."
+          
+          # 修改：直接使用 cp 执行，消除 TOCTOU 时间窗。将 stdout 和 stderr 全部捕获进行判定
+          if ! OUTPUT=$(aws s3 cp s3://${{ env.S3_BUCKET }}/${{ env.SAV_STORAGE_STATE_PATH }} ./${{ env.SAV_STORAGE_STATE_PATH }} --endpoint-url ${{ env.R2_ENDPOINT }} 2>&1); then
+            # 严格筛选对象不存在错误，降低将配置/网络错误误判为缓存未命中的风险
+            if echo "$OUTPUT" | grep -iq "NoSuchKey" || (echo "$OUTPUT" | grep -iq "HeadObject" && echo "$OUTPUT" | grep -iqE "404|Not Found"); then
+              if echo "$OUTPUT" | grep -iq "NoSuchBucket"; then
+                echo "::error::Failed to download from R2 due to bucket not found: $OUTPUT"
+                exit 1
+              fi
+              echo "[INFO] Cache missed (Object not found on R2). Proceeding with fallback..."
+            else
+              echo "::error::Fatal error connecting to R2 (Auth/Endpoint/Network): $OUTPUT"
+              exit 1
+            fi
           else
-            echo "[WARN] Cache missed and no seed secret provided. Script will attempt fresh login."
+            echo "[INFO] Successfully downloaded Session file from R2."
+          fi
+          
+          if [ ! -f "${{ env.SAV_STORAGE_STATE_PATH }}" ] && [ -n "$SAV_JSON_SEED" ]; then
+            echo "[INFO] Cache missed. Seeding Session file from secret..."
+            printf '%s' "$SAV_JSON_SEED" > "${{ env.SAV_STORAGE_STATE_PATH }}"
           fi
 
-      # 3. 核心业务：在虚拟显示器中执行 TS 脚本
+          if [ ! -f "${{ env.SAV_STORAGE_STATE_PATH }}" ]; then
+            echo "::error::Session file missing from R2 and no valid seed provided."
+            exit 1
+          fi
+          
+          ls -la "${{ env.SAV_STORAGE_STATE_PATH }}" || echo "[WARN] Session file not found on disk!"
+
       - name: Execute Export Script
         run: |
-          # 运行前检查文件是否存在，方便在 Actions 日志中排错
-          ls -la "${{ env.SAV_STORAGE_STATE_PATH }}" || echo "[WARN] Session file not found on disk!"
           xvfb-run --auto-servernum --server-args="-screen 0 1920x1080x24" npx ts-node src/index.ts
 
-      # 4. 存档：覆盖并保存最新的状态
-      - name: Save Session Cache
-        if: success()
-        uses: actions/cache/save@v4
-        with:
-          path: ${{ env.SAV_STORAGE_STATE_PATH }}
-          key: sav-session-${{ runner.os }}-${{ github.run_id }}
+      # 修改点 1：管理上传到 R2 的数据 (状态文件和成功导出的数据)
+      - name: Upload State and CSV to R2
+        if: always() 
+        run: |
+          # 无论成功失败，都尝试保存最新的 Session 状态（防止 Cookie 失效）
+          if [ -f "${{ env.SAV_STORAGE_STATE_PATH }}" ]; then
+            aws s3 cp ./${{ env.SAV_STORAGE_STATE_PATH }} s3://${{ env.S3_BUCKET }}/${{ env.SAV_STORAGE_STATE_PATH }} --endpoint-url ${{ env.R2_ENDPOINT }}
+          fi
+          
+          # 只有存在下载文件时，才同步 downloads 目录到 R2
+          if [ -d "downloads" ] && [ "$(ls -A downloads)" ]; then
+            aws s3 sync downloads/ s3://${{ env.S3_BUCKET }}/downloads/ --endpoint-url ${{ env.R2_ENDPOINT }}
+          fi
+          # 注意：这里去掉了原来把 logs 同步到 R2 的代码
 
-      # 5. 上传导出的 CSV 文件
-      - name: Upload Downloaded CSV
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: sav-auctions-csv
-          path: downloads/*.csv
-          retention-days: 30
-
-      # 6. 上传错误截图
-      - name: Upload Error Logs
+      # 修改点 2：如果运行失败，将错误截图上传到 GitHub Artifacts
+      - name: Upload Error Logs to GitHub
         if: failure()
         uses: actions/upload-artifact@v4
         with:
           name: error-screenshots
           path: logs/
           retention-days: 7
+
+      - name: Healthcheck Ping (Success)
+        if: success()
+        run: curl -fsS -m 10 --retry 5 https://hc-ping.com/2483718f-0a36-48cd-a1d2-df3af63af630
+
+      - name: Healthcheck Ping (Failure)
+        if: failure()
+        run: curl -fsS -m 10 --retry 5 https://hc-ping.com/2483718f-0a36-48cd-a1d2-df3af63af630/fail
