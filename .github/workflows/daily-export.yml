@@ -50,7 +50,11 @@ jobs:
       - name: Install system dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y xvfb awscli
+          sudo apt-get install -y xvfb curl unzip
+          curl -sSLo /tmp/awscliv2.zip https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip
+          unzip -q /tmp/awscliv2.zip -d /tmp
+          sudo /tmp/aws/install
+          aws --version
           npx playwright install chromium --with-deps
 
 
