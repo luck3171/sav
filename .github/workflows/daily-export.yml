@@ -24,8 +24,7 @@ jobs:
       EMAIL_HOST: ${{ secrets.EMAIL_HOST }}
       SAV_NO_SANDBOX: 'true'
       SAV_STORAGE_STATE_PATH: .sav-storage-state.json
-      GITHUB_ACTIONS: 'true'
-      SAV_HEADLESS: 'false'
+      SAV_HEADLESS: 'false' 
       
       S3_BUCKET: 'domains-storage' 
       R2_ENDPOINT: 'https://88a983a33ad1822518ad743ad7d98dcb.r2.cloudflarestorage.com'
@@ -48,14 +47,10 @@ jobs:
       - name: Install Node dependencies
         run: npm ci
 
-      - name: Install system dependencies
+      - name: Install Playwright & Xvfb
         run: |
           sudo apt-get update
-          sudo apt-get install -y xvfb curl unzip
-          curl -sSLo /tmp/awscliv2.zip https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip
-          unzip -q /tmp/awscliv2.zip -d /tmp
-          sudo /tmp/aws/install
-          aws --version
+          sudo apt-get install -y xvfb
           npx playwright install chromium --with-deps
 
 
