@@ -25,6 +25,7 @@ jobs:
       SAV_NO_SANDBOX: 'true'
       SAV_STORAGE_STATE_PATH: .sav-storage-state.json
       GITHUB_ACTIONS: 'true'
+      SAV_HEADLESS: 'false'
       
       S3_BUCKET: 'domains-storage' 
       R2_ENDPOINT: 'https://88a983a33ad1822518ad743ad7d98dcb.r2.cloudflarestorage.com'
