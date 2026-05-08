@@ -193,9 +193,18 @@ export async function triggerExport(appConfig: typeof config): Promise<Date> {
 
     if (!sessionReady) throw new Error('登录状态不可用，未能进入可导出页面。');
 
+    const loadingBanner = page.getByText(/Fetching your latest auctions/i);
+    try {
+      await loadingBanner.waitFor({ state: 'hidden', timeout: 45000 });
+    } catch {
+      console.warn('[WARN] Loading banner stuck over 45s, reloading page...');
+      await page.reload({ waitUntil: 'domcontentloaded' });
+      await loadingBanner.waitFor({ state: 'hidden', timeout: globalTimeout });
+    }
+
     const exportBtn = getExportButtonLocator(page);
     try {
-      await exportBtn.scrollIntoViewIfNeeded({ timeout: TIMEOUTS.NETWORK_IDLE });
+      await exportBtn.scrollIntoViewIfNeeded({ timeout: globalTimeout });
     } catch (err) {
       console.warn('[WARN] scrollIntoViewIfNeeded failed:', err instanceof Error ? err.message : err);
     }
