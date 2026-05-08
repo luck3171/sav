@@ -37,7 +37,7 @@ const envSchema = z.object({
   ).default(false),
 
   // 超时配置：自动将字符串数字转换为 number
-  SAV_EXPORT_TIMEOUT_MS: z.coerce.number().default(30000),
+  SAV_EXPORT_TIMEOUT_MS: z.coerce.number().default(120000),
 
 }).superRefine((data, ctx) => {
   // 2. 复杂的跨字段级联校验 (Business Logic Validation)
