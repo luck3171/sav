@@ -209,45 +209,57 @@ export async function triggerExport(appConfig: typeof config): Promise<Date> {
       console.warn('[WARN] scrollIntoViewIfNeeded failed:', err instanceof Error ? err.message : err);
     }
     
-    // 1. 等待按钮在 DOM 中不仅可见，而且不处于 disabled 状态
     await exportBtn.waitFor({ state: 'visible', timeout: globalTimeout });
-    // 如果业务上有特定的网络请求表示加载完成，可以在这里 wait 一下那个接口，或者稍微给一点 buffer 兜底 Hydration
     await page.waitForTimeout(1000); 
 
     const successToast = page.getByText(/successfully generated and sent/i);
     let isExportSuccessful = false;
-    const maxRetries = 3;
+    
+    // 因为生成过程漫长，我们将重试次数降为 2，避免频繁干扰页面
+    const maxRetries = 2; 
 
     for (let attempt = 1; attempt <= maxRetries; attempt++) {
       try {
         console.log(`[INFO] 尝试点击 Export 按钮 (第 ${attempt}/${maxRetries} 次)...`);
         
-        // 3. 防御性清理：确保旧的 Toast 已经不在页面上
         await successToast.waitFor({ state: 'hidden', timeout: 3000 }).catch(() => {});
 
-        // 2. 优雅降级的点击策略
         try {
-          // 优先尝试常规点击，享受 Playwright 的安全性检查
           await exportBtn.click({ timeout: 5000 });
         } catch (normalClickErr) {
           console.warn(`[WARN] 常规点击受阻，降级尝试强制点击...`);
-          // 兜底：无视客服气泡等图层遮挡，直击 DOM
           await exportBtn.click({ force: true, timeout: 5000 });
         }
 
-        // 等待新的 Toast 出现
-        await successToast.waitFor({ state: 'visible', timeout: 20000 });
+        console.log(`[INFO] 点击已触发，系统可能正在生成数据文件，耐心等待 Toast 出现...`);
+        
+        // 核心修改 1：将等待 Toast 的超时时间从 20s 暴增到 90s (甚至可以写 120s)
+        await successToast.waitFor({ state: 'visible', timeout: 90000 }); 
         
         console.log(`[INFO] 成功捕获 Export 成功提示！`);
         isExportSuccessful = true;
-        break; // 成功触发，跳出循环
+        break; 
 
       } catch (clickErr) {
-        // 4. 打印真实的异常堆栈，方便排查是 detached、timeout 还是 intercept
-        console.warn(`[WARN] 第 ${attempt} 次点击循环未能确认成功。具体异常:`, clickErr instanceof Error ? clickErr.message : clickErr);
+        console.warn(`[WARN] 第 ${attempt} 次等待 Toast 超时或失败。具体异常:`, clickErr instanceof Error ? clickErr.message : clickErr);
         
         if (attempt < maxRetries) {
-          console.log('[INFO] 等待 3 秒后进行下一次尝试...');
+          console.log('[INFO] 检查是否仍处于 Loading 状态...');
+          
+          // 核心修改 2：在重试之前，检查一下是不是还在生成中。如果还在生成，再多等一会，而不是盲目重点
+          const loadingOverlay = page.locator('div:has-text("Fetching"), [class*="loading"]').first();
+          if (await loadingOverlay.isVisible().catch(() => false)) {
+              console.log('[INFO] 页面仍在生成中，追加 120 秒等待时间...');
+              try {
+                  await successToast.waitFor({ state: 'visible', timeout: 120000 });
+                  isExportSuccessful = true;
+                  break; // 追加等待成功了，直接跳出
+              } catch (e) {
+                  console.warn('[WARN] 追加等待依然超时。');
+              }
+          }
+            
+          console.log('[INFO] 等待 3 秒后进行下一次点击尝试...');
           await page.waitForTimeout(3000); 
         }
       }
