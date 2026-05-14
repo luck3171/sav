@@ -26,6 +26,7 @@ jobs:
       SAV_HEADLESS: 'false'
       SAV_FINGERPRINT_SEED: '54321'
       SAV_USER_DATA_DIR: .sav-profile
+      CLOAKBROWSER_AUTO_UPDATE: 'false'
 
       R2_ENDPOINT: 'https://88a983a33ad1822518ad743ad7d98dcb.r2.cloudflarestorage.com'
       R2_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
