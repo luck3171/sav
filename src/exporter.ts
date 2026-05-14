@@ -18,14 +18,15 @@ const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve,
 
 async function detectCloudflare(page: Page): Promise<boolean> {
   const title = (await page.title()).toLowerCase();
-  if (title.includes('just a moment') || title.includes('cloudflare')) return true;
+  if (title.includes('just a moment') || title.includes('cloudflare') || title.includes('verify')) return true;
 
   const url = page.url().toLowerCase();
   if (url.includes('/cdn-cgi/') || url.includes('__cf_challenge')) return true;
 
   const cfElements = page.locator(
     '#cf-wrapper, #challenge-running, #challenge-stage, #cf-please-wait, ' +
-    '[id^="cf-"], iframe[src*="challenge"]'
+    '[id^="cf-"], iframe[src*="challenge"], iframe[src*="challenges.cloudflare.com"], ' +
+    '#cf-turnstile'
   );
   try {
     return (await cfElements.count()) > 0;
@@ -34,23 +35,44 @@ async function detectCloudflare(page: Page): Promise<boolean> {
   }
 }
 
+async function tryClickTurnstile(page: Page): Promise<void> {
+  const turnstileFrame = page.locator('iframe[src*="challenges.cloudflare.com"]').first();
+  try {
+    if (await turnstileFrame.isVisible({ timeout: 2000 })) {
+      console.log('[INFO] 检测到 Turnstile 验证框，尝试点击...');
+      await turnstileFrame.click({ timeout: 3000 });
+      await sleep(2000);
+    }
+  } catch {
+    // Turnstile not present or not interactable
+  }
+}
+
 async function waitForCloudflare(page: Page): Promise<void> {
   const isCloudflare = await detectCloudflare(page);
   if (!isCloudflare) return;
 
-  try {
-    const deadline = Date.now() + TIMEOUTS.CF_WAIT;
-    while (Date.now() < deadline) {
-      const title = (await page.title()).toLowerCase();
-      if (!title.includes('just a moment') && !title.includes('cloudflare')) break;
-      await sleep(1000);
+  for (let attempt = 1; attempt <= 2; attempt++) {
+    if (attempt > 1) {
+      console.log('[INFO] 刷新页面重新处理 Cloudflare 挑战...');
+      await page.reload({ waitUntil: 'domcontentloaded' });
     }
 
-    console.log('[INFO] Cloudflare challenge passed');
-    await page.waitForLoadState('networkidle', { timeout: TIMEOUTS.NETWORK_IDLE });
-  } catch (err) {
-    console.warn('[WARN] Cloudflare wait state failed, proceeding anyway:', err instanceof Error ? err.message : err);
+    const deadline = Date.now() + TIMEOUTS.CF_WAIT;
+    while (Date.now() < deadline) {
+      const stillBlocked = await detectCloudflare(page);
+      if (!stillBlocked) {
+        console.log('[INFO] Cloudflare challenge passed');
+        await page.waitForLoadState('networkidle', { timeout: TIMEOUTS.NETWORK_IDLE }).catch(() => {});
+        return;
+      }
+
+      await tryClickTurnstile(page);
+      await sleep(1000);
+    }
   }
+
+  console.warn('[WARN] Cloudflare challenge could not be resolved after retry');
 }
 
 async function navigateGuarded(page: Page, url: string, options?: Parameters<Page['goto']>[1]): Promise<void> {
