@@ -1,4 +1,4 @@
-name: Daily SAV Export V2
+name: Daily SAV Export
 
 on:
   schedule:
@@ -39,6 +39,7 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: '20'
+          cache: 'npm'
 
       - name: Install Node dependencies
         run: npm ci
