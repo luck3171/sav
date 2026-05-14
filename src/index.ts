@@ -25,23 +25,48 @@ const envSchema = z.object({
     z.boolean()
   ).default(false),
 
-  // 路径配置：提供默认值并自动处理绝对路径
-  SAV_STORAGE_STATE_PATH: z.string()
+  SAV_USER_DATA_DIR: z.string()
     .trim()
     .min(1)
-    .default(path.resolve(process.cwd(), '.sav-storage-state.json')),
+    .default(path.resolve(process.cwd(), '.sav-profile')),
+
+  SAV_FINGERPRINT_SEED: z.preprocess(
+    (val) => {
+      const seed = String(val ?? '').trim();
+      return seed === '' ? undefined : seed;
+    },
+    z.string().regex(/^\d+$/, 'SAV_FINGERPRINT_SEED 必须为数字字符串')
+  ).optional(),
 
   SAV_NO_SANDBOX: z.preprocess(
     (val) => val === '1' || String(val).toLowerCase() === 'true',
     z.boolean()
   ).default(false),
 
+  SAV_HEADLESS: z.preprocess(
+    (val) => {
+      if (val === undefined) return undefined;
+      const raw = String(val).toLowerCase();
+      return raw === '1' || raw === 'true';
+    },
+    z.boolean()
+  ).default(true),
+
   // 超时配置：自动将字符串数字转换为 number
   SAV_EXPORT_TIMEOUT_MS: z.coerce.number().default(120000),
 
+  // Export toast 超时
+  SAV_EXPORT_TOAST_TIMEOUT_MS: z.preprocess(
+    (val) => {
+      const raw = String(val ?? '').trim();
+      return raw === '' ? undefined : raw;
+    },
+    z.coerce.number()
+  ).optional(),
+
 }).superRefine((data, ctx) => {
   // 2. 复杂的跨字段级联校验 (Business Logic Validation)
-  const hasReusableSession = !data.SAV_FORCE_RELOGIN && fs.existsSync(data.SAV_STORAGE_STATE_PATH);
+  const hasReusableSession = !data.SAV_FORCE_RELOGIN && fs.existsSync(data.SAV_USER_DATA_DIR);
   
   if (!hasReusableSession) {
     if (!data.SAV_USERNAME) {
@@ -65,11 +90,15 @@ const envSchema = z.object({
 export const config = envSchema.parse(process.env);
 
 // 此时如果通过校验，可以安全地输出启动信息
-const hasReusableSession = !config.SAV_FORCE_RELOGIN && fs.existsSync(config.SAV_STORAGE_STATE_PATH);
+const hasReusableSession = !config.SAV_FORCE_RELOGIN && fs.existsSync(config.SAV_USER_DATA_DIR);
 if (hasReusableSession) {
-  console.log(`[INFO] 已检测到会话状态文件，将优先复用: ${config.SAV_STORAGE_STATE_PATH}`);
+  console.log(`[INFO] 已检测到用户数据目录，将优先复用: ${config.SAV_USER_DATA_DIR}`);
 } else {
   console.log('[INFO] 未检测到可复用会话，将使用账号密码登录。');
+}
+
+if (config.SAV_FINGERPRINT_SEED) {
+  console.log(`[INFO] 使用固定指纹种子: ${config.SAV_FINGERPRINT_SEED}`);
 }
 
 
