@@ -1,4 +1,4 @@
-name: Daily SAV Export
+name: Daily SAV Export V2
 
 on:
   schedule:
