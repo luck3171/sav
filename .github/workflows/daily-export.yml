@@ -27,12 +27,9 @@ jobs:
       SAV_FINGERPRINT_SEED: '54321'
       SAV_USER_DATA_DIR: .sav-profile
 
-      S3_BUCKET: 'domains-storage'
       R2_ENDPOINT: 'https://88a983a33ad1822518ad743ad7d98dcb.r2.cloudflarestorage.com'
-
-      AWS_DEFAULT_REGION: 'auto'
-      AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
-      AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+      R2_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+      R2_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
 
     steps:
       - name: Checkout repository
@@ -56,20 +53,7 @@ jobs:
 
 
       - name: Restore Browser Profile from R2 Cache
-        run: |
-          PROFILE_DIR="${{ env.SAV_USER_DATA_DIR }}"
-          mkdir -p "$PROFILE_DIR"
-
-          echo "[INFO] Attempting to download cached browser profile from R2..."
-          if OUTPUT=$(aws s3 cp "s3://${{ env.S3_BUCKET }}/profile-cache.tar.gz" ./profile-cache.tar.gz --endpoint-url ${{ env.R2_ENDPOINT }} 2>&1); then
-            echo "[INFO] Profile cache found. Extracting..."
-            tar -xzf profile-cache.tar.gz -C "$PROFILE_DIR" 2>/dev/null && echo "[INFO] Profile restored" || echo "[WARN] Extract failed, will create fresh profile"
-            rm -f profile-cache.tar.gz
-          else
-            echo "[INFO] No cached profile found, will create fresh session."
-          fi
-
-          ls -la "$PROFILE_DIR/" || echo "[INFO] Empty profile directory"
+        run: npx ts-node scripts/r2.ts restore
 
       - name: Execute Export Script
         run: |
@@ -77,22 +61,11 @@ jobs:
 
       - name: Cache Browser Profile to R2
         if: success()
-        run: |
-          PROFILE_DIR="${{ env.SAV_USER_DATA_DIR }}"
-          if [ -d "$PROFILE_DIR" ] && [ "$(ls -A "$PROFILE_DIR" 2>/dev/null)" ]; then
-            echo "[INFO] Caching browser profile to R2..."
-            tar -czf profile-cache.tar.gz -C "$PROFILE_DIR" .
-            aws s3 cp ./profile-cache.tar.gz "s3://${{ env.S3_BUCKET }}/profile-cache.tar.gz" --endpoint-url ${{ env.R2_ENDPOINT }}
-            rm -f profile-cache.tar.gz
-            echo "[INFO] Profile cached successfully"
-          fi
+        run: npx ts-node scripts/r2.ts upload-profile
 
       - name: Upload Downloaded CSVs to R2
         if: success()
-        run: |
-          if [ -d "downloads" ] && [ "$(ls -A downloads)" ]; then
-            aws s3 sync downloads/ "s3://${{ env.S3_BUCKET }}/downloads/" --endpoint-url ${{ env.R2_ENDPOINT }}
-          fi
+        run: npx ts-node scripts/r2.ts upload-csv
 
       - name: Upload Error Logs to GitHub
         if: failure()
