@@ -18,16 +18,9 @@ const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve,
 
 async function detectCloudflare(page: Page): Promise<boolean> {
   const title = (await page.title()).toLowerCase();
-  if (title.includes('just a moment') || title.includes('cloudflare') || title.includes('verify')) return true;
+  if (title.includes('just a moment') || title.includes('cloudflare')) return true;
 
-  const url = page.url().toLowerCase();
-  if (url.includes('/cdn-cgi/') || url.includes('__cf_challenge')) return true;
-
-  const cfElements = page.locator(
-    '#cf-wrapper, #challenge-running, #challenge-stage, #cf-please-wait, ' +
-    '[id^="cf-"], iframe[src*="challenge"], iframe[src*="challenges.cloudflare.com"], ' +
-    '#cf-turnstile'
-  );
+  const cfElements = page.locator('#cf-wrapper, #challenge-running, #challenge-stage, #cf-please-wait');
   try {
     return (await cfElements.count()) > 0;
   } catch {
@@ -35,44 +28,23 @@ async function detectCloudflare(page: Page): Promise<boolean> {
   }
 }
 
-async function tryClickTurnstile(page: Page): Promise<void> {
-  const turnstileFrame = page.locator('iframe[src*="challenges.cloudflare.com"]').first();
-  try {
-    if (await turnstileFrame.isVisible({ timeout: 2000 })) {
-      console.log('[INFO] 检测到 Turnstile 验证框，尝试点击...');
-      await turnstileFrame.click({ timeout: 3000 });
-      await sleep(2000);
-    }
-  } catch {
-    // Turnstile not present or not interactable
-  }
-}
-
 async function waitForCloudflare(page: Page): Promise<void> {
   const isCloudflare = await detectCloudflare(page);
   if (!isCloudflare) return;
 
-  for (let attempt = 1; attempt <= 2; attempt++) {
-    if (attempt > 1) {
-      console.log('[INFO] 刷新页面重新处理 Cloudflare 挑战...');
-      await page.reload({ waitUntil: 'domcontentloaded' });
-    }
-
+  try {
     const deadline = Date.now() + TIMEOUTS.CF_WAIT;
     while (Date.now() < deadline) {
-      const stillBlocked = await detectCloudflare(page);
-      if (!stillBlocked) {
-        console.log('[INFO] Cloudflare challenge passed');
-        await page.waitForLoadState('networkidle', { timeout: TIMEOUTS.NETWORK_IDLE }).catch(() => {});
-        return;
-      }
-
-      await tryClickTurnstile(page);
+      const title = (await page.title()).toLowerCase();
+      if (!title.includes('just a moment') && !title.includes('cloudflare')) break;
       await sleep(1000);
     }
-  }
 
-  console.warn('[WARN] Cloudflare challenge could not be resolved after retry');
+    console.log('[INFO] Cloudflare challenge passed');
+    await page.waitForLoadState('networkidle', { timeout: TIMEOUTS.NETWORK_IDLE });
+  } catch (err) {
+    console.warn('[WARN] Cloudflare wait state failed, proceeding anyway:', err instanceof Error ? err.message : err);
+  }
 }
 
 async function navigateGuarded(page: Page, url: string, options?: Parameters<Page['goto']>[1]): Promise<void> {
@@ -105,23 +77,6 @@ async function isSessionValid(page: Page): Promise<boolean> {
     return false;
   } catch {
     return true;
-  }
-}
-
-// ---- Page content readiness ----
-
-async function waitForAuctionsPageReady(page: Page, timeout: number): Promise<boolean> {
-  const knownContent = page.getByText(/Fetching your latest auctions/i)
-    .or(page.locator('div[class*="export-div"]'))
-    .or(page.locator('table'))
-    .or(page.getByRole('table'))
-    .first();
-  try {
-    await knownContent.waitFor({ state: 'visible', timeout });
-    return true;
-  } catch {
-    console.warn('[WARN] Auctions page known content did not appear within timeout');
-    return false;
   }
 }
 
@@ -162,11 +117,18 @@ async function tryFillLoginForm(page: Page, username: string, password: string):
   await passwordInput.pressSequentially(password, { delay: 50 });
 
   console.log('[INFO] 提交密码...');
+  await sleep(500);
+
+  // 密码步骤的按钮可能和邮箱步骤不同，重新定位
+  const pwdSubmit = page.getByRole('button', { name: /sign in|log in|submit|continue/i, exact: false }).last()
+    .or(page.locator('button[type="submit"]').last());
   try {
-    await submitBtn.waitFor({ state: 'visible', timeout: 5000 });
-    await submitBtn.click();
+    await pwdSubmit.waitFor({ state: 'visible', timeout: 5000 });
+    console.log('[INFO] 点击登录提交按钮...');
+    await pwdSubmit.click({ timeout: 5000 });
   } catch {
-    await page.keyboard.press('Enter');
+    console.log('[INFO] 按钮点击失败，尝试回车提交...');
+    await passwordInput.press('Enter');
   }
 
   console.log('[INFO] 等待登录完成（页面跳转或弹窗消失）...');
@@ -360,52 +322,23 @@ export async function triggerExport(appConfig: typeof config): Promise<Date> {
 
     if (!sessionReady) throw new Error('登录状态不可用，未能进入可导出页面。');
 
-    // ---- Retry loop: auctions page readiness + export button ----
-    const maxPageLoadRetries = 3;
-    let exportBtnReady = false;
-
-    for (let attempt = 1; attempt <= maxPageLoadRetries; attempt++) {
-      console.log(`[INFO] 拍卖页就绪检查 (第 ${attempt}/${maxPageLoadRetries} 次)...`);
-
-      await waitForAuctionsPageReady(page, globalTimeout);
-
-      const loadingBanner = page.getByText(/Fetching your latest auctions/i);
-      try {
-        await loadingBanner.waitFor({ state: 'hidden', timeout: 45000 });
-      } catch {
-        console.warn(`[WARN] Loading banner 45s 未消失 (attempt ${attempt}), 重新加载页面...`);
-        await page.reload({ waitUntil: 'domcontentloaded' });
-        await waitForCloudflare(page);
-        continue;
-      }
-
-      const btn = getExportButtonLocator(page);
-      try {
-        await btn.waitFor({ state: 'visible', timeout: globalTimeout });
-        exportBtnReady = true;
-        console.log('[INFO] Export 按钮已就绪。');
-        break;
-      } catch (err) {
-        console.warn(`[WARN] Export 按钮未找到 (attempt ${attempt}/${maxPageLoadRetries}):`,
-          err instanceof Error ? err.message : err);
-        if (attempt < maxPageLoadRetries) {
-          console.log('[INFO] 重新导航到拍卖页重试...');
-          await navigateGuarded(page, SAV_AUCTIONS_URL, { waitUntil: 'domcontentloaded', timeout: globalTimeout });
-        }
-      }
-    }
-
-    if (!exportBtnReady) {
-      throw new Error(`Export 按钮在 ${maxPageLoadRetries} 次重试后仍未找到，页面可能结构已变更或 CF 验证未通过。`);
+    const loadingBanner = page.getByText(/Fetching your latest auctions/i);
+    try {
+      await loadingBanner.waitFor({ state: 'hidden', timeout: 45000 });
+    } catch {
+      console.warn('[WARN] Loading banner stuck over 45s, reloading page...');
+      await page.reload({ waitUntil: 'domcontentloaded' });
+      await loadingBanner.waitFor({ state: 'hidden', timeout: globalTimeout });
     }
 
     const exportBtn = getExportButtonLocator(page);
     try {
-      await exportBtn.scrollIntoViewIfNeeded({ timeout: 10000 });
+      await exportBtn.scrollIntoViewIfNeeded({ timeout: globalTimeout });
     } catch (err) {
       console.warn('[WARN] scrollIntoViewIfNeeded failed:', err instanceof Error ? err.message : err);
     }
-
+    
+    await exportBtn.waitFor({ state: 'visible', timeout: globalTimeout });
     await sleep(1000);
 
     const successToast = page.getByText(/successfully generated and sent/i);
