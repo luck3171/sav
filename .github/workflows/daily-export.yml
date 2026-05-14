@@ -47,11 +47,15 @@ jobs:
       - name: Install Node dependencies
         run: npm ci
 
-      - name: Install Playwright & Xvfb
+      - name: Install system deps & Xvfb
         run: |
           sudo apt-get update
           sudo apt-get install -y xvfb
-          npx playwright install chromium --with-deps
+          # CloakBrowser 的 Chromium 需要系统库，playwright 的 install-deps 会安装所有必要依赖
+          npx playwright install-deps chromium
+
+      - name: Pre-download CloakBrowser binary
+        run: npx ts-node scripts/predownload-cloak.ts
 
       - name: Restore Browser Profile from R2 Cache
         run: |
