@@ -10,6 +10,7 @@ const TIMEOUTS = {
   NETWORK_IDLE: 10000,
   CF_WAIT: 30000,
   ELEMENT_VISIBLE: 3000,
+  TURNSTILE_TIMEOUT: 60000,
 };
 
 const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
@@ -41,15 +42,107 @@ async function waitForCloudflare(page: Page): Promise<void> {
     }
 
     console.log('[INFO] Cloudflare challenge passed');
-    await page.waitForLoadState('networkidle', { timeout: TIMEOUTS.NETWORK_IDLE });
+    await page.waitForLoadState('networkidle', { timeout: TIMEOUTS.NETWORK_IDLE }).catch(() => {
+      console.warn('[WARN] networkidle 超时，继续执行');
+    });
   } catch (err) {
     console.warn('[WARN] Cloudflare wait state failed, proceeding anyway:', err instanceof Error ? err.message : err);
   }
 }
 
+// ---- Cloudflare Turnstile (Verify you are human) handling ----
+
+/**
+ * Check if a Cloudflare Turnstile widget is present on the page.
+ */
+async function detectTurnstile(page: Page): Promise<boolean> {
+  // Turnstile widget can appear as a div with specific class or an iframe
+  const selectors = [
+    'div.cf-turnstile',
+    'iframe[src*="turnstile"]',
+    'iframe[src*="challenges.cloudflare"]',
+  ];
+  for (const sel of selectors) {
+    const count = await page.locator(sel).count().catch(() => 0);
+    if (count > 0) return true;
+  }
+  return false;
+}
+
+/**
+ * Try to solve a Cloudflare Turnstile challenge by clicking the checkbox.
+ * Uses human-like mouse movement and multiple fallback strategies.
+ */
+async function solveTurnstileChallenge(page: Page): Promise<boolean> {
+  try {
+    const present = await detectTurnstile(page);
+    if (!present) return false;
+
+    console.log('[INFO] 检测到 Cloudflare Turnstile 验证，尝试点击复选框...');
+
+    // Strategy 1: Click checkbox via frameLocator (inside cross-origin iframe)
+    try {
+      const turnstileFrame = page.frameLocator(
+        'iframe[src*="turnstile"], iframe[src*="challenges.cloudflare"]'
+      );
+      const checkbox = turnstileFrame.locator('input[type="checkbox"]').first();
+      await checkbox.waitFor({ state: 'visible', timeout: 10000 });
+
+      const box = await checkbox.boundingBox();
+      if (box) {
+        await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2, { steps: 8 });
+        await sleep(100 + Math.random() * 200);
+      }
+      await checkbox.click();
+      console.log('[INFO] Turnstile 复选框已点击（frame内）');
+    } catch {
+      // Strategy 2: Click the center of the iframe directly
+      console.log('[INFO] 尝试直接点击 Turnstile iframe...');
+      const iframeEl = page.locator(
+        'iframe[src*="turnstile"], iframe[src*="challenges.cloudflare"]'
+      ).first();
+      const box = await iframeEl.boundingBox();
+      if (box) {
+        await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2, { steps: 8 });
+        await sleep(100 + Math.random() * 200);
+        await page.mouse.click(box.x + box.width / 2, box.y + box.height / 2);
+        console.log('[INFO] Turnstile iframe 已点击');
+      }
+    }
+
+    // Wait for Turnstile to generate the response token
+    try {
+      await page.waitForFunction(() => {
+        const el = document.querySelector('[name="cf-turnstile-response"]');
+        return el && (el as HTMLInputElement).value && (el as HTMLInputElement).value.length > 0;
+      }, { timeout: TIMEOUTS.TURNSTILE_TIMEOUT });
+      console.log('[INFO] Turnstile 验证令牌已生成');
+    } catch {
+      console.warn('[WARN] Turnstile 令牌未检测到，但可能已完成');
+    }
+
+    // Wait for page to settle after verification
+    await page.waitForLoadState('load', { timeout: 30000 }).catch(() => {});
+    await sleep(2000);
+    console.log('[INFO] Turnstile 验证流程结束');
+    return true;
+  } catch (err) {
+    console.warn('[WARN] Turnstile 验证处理失败:', err instanceof Error ? err.message : err);
+    return false;
+  }
+}
+
+/**
+ * Combined handler: solves JS challenge first, then Turnstile if present.
+ */
+async function handlePageChallenge(page: Page): Promise<void> {
+  await waitForCloudflare(page);
+  await solveTurnstileChallenge(page);
+}
+
 async function navigateGuarded(page: Page, url: string, options?: Parameters<Page['goto']>[1]): Promise<void> {
   await page.goto(url, options);
-  await waitForCloudflare(page);
+  await handlePageChallenge(page);
 }
 
 // ---- Browser launch helpers ----
@@ -209,8 +302,8 @@ async function performLogin(page: Page, appConfig: typeof config): Promise<void>
     throw new Error('无法定位登录表单，可能是页面结构已变更。');
   }
 
-  // 登录成功后等待 Cloudflare 和页面稳定
-  await waitForCloudflare(page);
+  // 登录成功后等待 Cloudflare/Turnstile 和页面稳定
+  await handlePageChallenge(page);
   await page.waitForLoadState('networkidle', { timeout: 15000 }).catch(() => {
     console.warn('[WARN] Post-login network idle timeout');
   });
