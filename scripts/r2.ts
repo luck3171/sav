@@ -40,6 +40,10 @@ async function restore() {
     console.log('[INFO] Profile restored.');
   } catch (err: unknown) {
     const msg = err instanceof Error ? err.message : String(err);
+    // 清理临时文件和残缺的 profile 目录，确保后续从干净状态启动
+    if (fs.existsSync('profile-cache.tar.gz')) fs.unlinkSync('profile-cache.tar.gz');
+    fs.rmSync(profileDir, { recursive: true, force: true });
+
     if (err instanceof NoSuchKey || msg.includes('404') || msg.includes('NoSuchKey')) {
       console.log('[INFO] No cached profile, will create fresh.');
     } else {
