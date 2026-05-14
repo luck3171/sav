@@ -2,7 +2,7 @@ name: Daily SAV Export
 
 on:
   schedule:
-    - cron: '0 0,12 * * *' # 每天北京时间 08:00 和 20:00 运行
+    - cron: '12 0,12 * * *' # 每天北京时间 08:12 和 20:12 运行（避开整点高峰）
   workflow_dispatch: # 支持手动触发测试
 
 permissions:
